@@ -32,9 +32,12 @@ frontend/*.local
 !.vscode/settings.json
 
 # ==========================================
-# Cursor — contexto de IA (não versionado)
+# Cursor — ignora tudo exceto skills do projeto
 # ==========================================
 .cursor/
+!.cursor/
+!.cursor/skills/
+!.cursor/skills/**
 
 # ==========================================
 # OS
