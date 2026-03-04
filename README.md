@@ -1,16 +1,17 @@
-# 🔔 Aplicação de Notificação Asyncrona - RabbitMQ
+# Aplicação de Notificação Assíncrona entre Usuários
 
-> Aplicação fullstack de **envio de notificações entre usuários em tempo real**, construída com arquitetura limpa, mensageria assíncrona e push via SSE.
+> Aplicação fullstack de **envio de notificações entre usuários em tempo real**, construída com Clean Architecture, mensageria assíncrona via RabbitMQ e push via SSE.
 
 ---
 
-## 📋 Índice
+## Índice
 
 - [Sobre](#sobre)
 - [Arquitetura](#arquitetura)
 - [Fluxo de Notificação](#fluxo-de-notificação)
 - [Tecnologias](#tecnologias)
 - [Estrutura do Projeto](#estrutura-do-projeto)
+- [Testes](#testes)
 - [Pré-requisitos](#pré-requisitos)
 - [Como Executar](#como-executar)
 - [API](#api)
@@ -22,7 +23,7 @@
 
 ## Sobre
 
-O **App Notification Async** permite que usuários autenticados enviem notificações entre si em tempo real. Cada notificação é persistida no banco de dados, roteada de forma assíncrona pelo RabbitMQ e entregue instantaneamente ao destinatário via **Server-Sent Events (SSE)**, sem necessidade de polling.
+Permite que usuários autenticados enviem notificações tipadas entre si em tempo real. Cada notificação é persistida no PostgreSQL, roteada de forma assíncrona pelo RabbitMQ e entregue instantaneamente ao destinatário via **Server-Sent Events (SSE)**, sem necessidade de polling.
 
 **Funcionalidades:**
 - Cadastro e autenticação de usuários com JWT
@@ -36,7 +37,7 @@ O **App Notification Async** permite que usuários autenticados enviem notifica�
 
 ## Arquitetura
 
-O backend segue a **Arquitetura Hexagonal (Ports & Adapters)**, garantindo que a lógica de domínio seja completamente isolada de detalhes de infraestrutura.
+O backend segue **Clean Architecture** com camadas concêntricas e regra de dependência estrita: camadas externas dependem das internas, nunca o contrário.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -54,20 +55,23 @@ O backend segue a **Arquitetura Hexagonal (Ports & Adapters)**, garantindo que a
                             │
                             ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                          Backend                                 │
+│                    Backend — Clean Architecture                  │
 │           Spring Boot 3.3 · Java 21 · Virtual Threads           │
 │                                                                  │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  presentation/   →   application/   →   domain/         │    │
-│  │  (Controllers)       (Services)        (Entidades/Repos) │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                  │
-│  infrastructure/                                                 │
-│  ├── security/    JWT · JwtAuthFilter                           │
-│  ├── messaging/   RabbitMQ (TopicExchange · filas dinâmicas)    │
-│  ├── sse/         SseEmitterRegistry                            │
-│  ├── aop/         ExecutionTimeAspect (@LogExecutionTime)       │
-│  └── config/      RabbitMQConfig · SecurityConfig               │
+│  presentation/adapter/   →   application/port/input/            │
+│  (Controllers + DTOs)        (Interfaces dos Use Cases)         │
+│                                      │                          │
+│                              application/usecase/               │
+│                              (Implementações)                   │
+│                                      │                          │
+│                              application/port/output/           │
+│                              (Contratos de infraestrutura)      │
+│                                      │                          │
+│                              infrastructure/                    │
+│                              (Adapters: JPA, RabbitMQ, JWT...)  │
+│                                      │                          │
+│                              domain/entity/                     │
+│                              (POJOs puros, zero dependências)   │
 └───────────────┬──────────────────────────┬───────────────────────┘
                 │                          │
                 ▼                          ▼
@@ -79,6 +83,17 @@ O backend segue a **Arquitetura Hexagonal (Ports & Adapters)**, garantindo que a
       └──────────────────┘      └─────────────────────┘
 ```
 
+### Camadas e responsabilidades
+
+| Camada | Responsabilidade |
+|---|---|
+| `domain/entity` | Entidades de domínio puras — `User`, `Notification`, `NotificationType`. Zero dependências externas |
+| `application/port/input` | Interfaces dos use cases. Os controllers chamam estas interfaces, nunca a implementação diretamente |
+| `application/port/output` | Contratos que a infraestrutura deve satisfazer — repositórios, publisher, encoder, JWT |
+| `application/usecase` | Implementações dos casos de uso. Dependem apenas de `domain` e `port/output` |
+| `infrastructure` | Adapters que implementam `port/output` — JPA, RabbitMQ, Spring Security, AOP |
+| `presentation/adapter` | Controllers HTTP, DTOs de request/response |
+
 ---
 
 ## Fluxo de Notificação
@@ -88,25 +103,26 @@ O backend segue a **Arquitetura Hexagonal (Ports & Adapters)**, garantindo que a
       │
       │  POST /api/notifications/send
       ▼
-  NotificationService.send()
+  NotificationController
+      │  chama SendNotificationPort (interface)
+      ▼
+  SendNotificationUseCase
       │
-      ├─── persiste no PostgreSQL
+      ├─── persiste via NotificationRepositoryPort → NotificationRepositoryAdapter → PostgreSQL
       │
-      └─── NotificationPublisher.publish()
-                │
-                │  RabbitMQ: notification.exchange
+      └─── publica via NotificationPublisherPort → NotificationPublisherAdapter → RabbitMQ
+                │  exchange: notification.exchange
                 │  routing key: notification.<recipientId>
                 ▼
           NotificationListenerManager
-          (fila dinâmica criada ao conectar no SSE)
+          (fila dinâmica: notification.user.<uuid>, criada ao conectar no SSE)
                 │
                 ▼
           SseEmitterRegistry.sendToUser()
-                │
-                │  evento SSE: "notification"
+                │  evento SSE: name="notification"
                 ▼
-  [Destinatário - Browser]
-          useSSE hook
+  [Destinatário — Browser]
+          useSSE hook (EventSource)
                 │
                 ├─── useNotificationStore (Zustand) → atualiza UI
                 └─── react-hot-toast → exibe toast
@@ -124,13 +140,13 @@ O backend segue a **Arquitetura Hexagonal (Ports & Adapters)**, garantindo que a
 | Spring Boot | 3.3.4 | Framework principal |
 | Spring Security | 6.x | Autenticação JWT stateless |
 | Spring AMQP | 3.x | Integração com RabbitMQ |
-| Spring Data JPA | 3.x | Persistência |
-| Spring AOP | 3.x | Cross-cutting concerns |
-| Flyway | 10.x | Migrations de banco |
+| Spring Data JPA | 3.x | Persistência (camada de infraestrutura) |
+| Spring AOP | 3.x | Cross-cutting concerns (performance logging) |
+| Flyway | 10.x | Migrations de banco — única fonte de verdade do schema |
 | PostgreSQL | 16 | Banco de dados principal |
 | RabbitMQ | 3 | Broker de mensagens assíncronas |
 | jjwt | 0.12.6 | Geração e validação de JWT |
-| Lombok | latest | Redução de boilerplate |
+| Lombok | latest | Redução de boilerplate (apenas em camadas não-domínio) |
 
 ### Frontend
 
@@ -140,8 +156,8 @@ O backend segue a **Arquitetura Hexagonal (Ports & Adapters)**, garantindo que a
 | TypeScript | 5.5 | Tipagem estática |
 | Vite | 5.4 | Bundler e dev server |
 | TailwindCSS | 3.4 | Estilização |
-| Zustand | 5.0 | Gerenciamento de estado |
-| Axios | 1.7 | Cliente HTTP |
+| Zustand | 5.0 | Gerenciamento de estado global |
+| Axios | 1.7 | Cliente HTTP com interceptors JWT |
 | React Router | 6.26 | Roteamento client-side |
 | Framer Motion | 11.5 | Animações |
 | react-hot-toast | 2.4 | Notificações toast |
@@ -155,37 +171,85 @@ O backend segue a **Arquitetura Hexagonal (Ports & Adapters)**, garantindo que a
 app-notification-async/
 ├── backend/
 │   ├── src/main/java/com/appnotification/
-│   │   ├── application/
-│   │   │   ├── dto/               # Records Java (DTOs imutáveis)
-│   │   │   └── service/           # AuthService · NotificationService · UserService
 │   │   ├── domain/
-│   │   │   ├── model/             # User · Notification · NotificationType
-│   │   │   └── repository/        # Interfaces de porta (UserRepository · NotificationRepository)
+│   │   │   └── entity/                    # User · Notification · NotificationType
+│   │   │                                  # POJOs puros — zero dependências externas
+│   │   ├── application/
+│   │   │   ├── port/
+│   │   │   │   ├── input/
+│   │   │   │   │   ├── auth/              # RegisterUserPort · LoginUserPort
+│   │   │   │   │   ├── notification/      # SendNotificationPort · GetNotificationsPort
+│   │   │   │   │   │                      # MarkNotificationAsReadPort · CountUnreadNotificationsPort
+│   │   │   │   │   └── user/              # ListUsersPort
+│   │   │   │   └── output/                # UserRepositoryPort · NotificationRepositoryPort
+│   │   │   │                              # NotificationPublisherPort · PasswordEncoderPort
+│   │   │   │                              # TokenGeneratorPort · SsePort
+│   │   │   └── usecase/
+│   │   │       ├── auth/                  # RegisterUserUseCase · LoginUserUseCase
+│   │   │       ├── notification/          # SendNotificationUseCase · GetNotificationsUseCase
+│   │   │       │                          # MarkNotificationAsReadUseCase · CountUnreadNotificationsUseCase
+│   │   │       └── user/                  # ListUsersUseCase
 │   │   ├── infrastructure/
-│   │   │   ├── aop/               # @LogExecutionTime · ExecutionTimeAspect
-│   │   │   ├── config/            # RabbitMQConfig · SecurityConfig
-│   │   │   ├── messaging/         # NotificationPublisher · NotificationListenerManager
-│   │   │   ├── security/          # JwtService · JwtAuthFilter
-│   │   │   └── sse/               # SseEmitterRegistry
-│   │   └── presentation/          # AuthController · NotificationController · UserController
+│   │   │   ├── persistence/
+│   │   │   │   ├── entity/                # UserJpaEntity · NotificationJpaEntity
+│   │   │   │   ├── repository/            # UserJpaRepository · NotificationJpaRepository
+│   │   │   │   └── adapter/               # UserRepositoryAdapter · NotificationRepositoryAdapter
+│   │   │   ├── messaging/                 # NotificationPublisherAdapter · NotificationListenerManager
+│   │   │   │                              # NotificationMessage
+│   │   │   ├── security/                  # JwtService · JwtAuthFilter
+│   │   │   │                              # PasswordEncoderAdapter · TokenGeneratorAdapter
+│   │   │   ├── sse/                       # SseEmitterRegistry
+│   │   │   ├── aop/                       # @LogExecutionTime · ExecutionTimeAspect
+│   │   │   └── config/                    # RabbitMQConfig · SecurityConfig
+│   │   ├── presentation/
+│   │   │   └── adapter/
+│   │   │       ├── controller/            # AuthController · NotificationController
+│   │   │       │                          # UserController · GlobalExceptionHandler
+│   │   │       └── dto/                   # RegisterRequest · LoginRequest · AuthResponse
+│   │   │                                  # SendNotificationRequest · NotificationResponse
+│   │   │                                  # UserResponse · PageResponse
+│   │   └── AppNotificationApplication.java
 │   ├── src/main/resources/
-│   │   ├── db/migration/          # V1__create_users_table.sql · V2__create_notifications_table.sql
+│   │   ├── db/migration/                  # V1__create_users_table.sql
+│   │   │                                  # V2__create_notifications_table.sql
 │   │   └── application.yml
+│   ├── src/test/java/com/appnotification/
+│   │   ├── application/service/           # AuthServiceTest · NotificationServiceTest · UserServiceTest
+│   │   └── infrastructure/security/       # JwtServiceTest
 │   ├── Dockerfile
 │   └── pom.xml
 ├── frontend/
 │   ├── src/
-│   │   ├── components/            # NotificationBell · NotificationList · SendNotificationForm · UserCard
-│   │   ├── hooks/                 # useSSE (EventSource → Zustand)
-│   │   ├── lib/                   # api-client · date-utils
-│   │   ├── pages/                 # LoginPage · RegisterPage · DashboardPage
-│   │   ├── store/                 # auth-store · notification-store
-│   │   ├── types/                 # index.ts
+│   │   ├── components/                    # notification-bell · notification-list
+│   │   │                                  # send-notification-form · user-card · protected-route
+│   │   ├── hooks/                         # use-sse
+│   │   ├── lib/                           # api-client · date-utils
+│   │   ├── pages/                         # login-page · register-page · dashboard-page
+│   │   ├── store/                         # auth-store · notification-store
+│   │   ├── types/                         # index.ts
 │   │   └── App.tsx
 │   ├── nginx.conf
 │   ├── Dockerfile
 │   └── package.json
 └── docker-compose.yml
+```
+
+---
+
+## Testes
+
+Testes unitários implementados no backend com **JUnit 5 + Mockito** — sem Spring context, execução em ~6s.
+
+| Classe de Teste | Testes | Cenários |
+|---|---|---|
+| `AuthServiceTest` | 6 | Registro único, email duplicado, username duplicado, login válido, usuário não encontrado, senha incorreta |
+| `NotificationServiceTest` | 8 | Envio + persistência + publicação, sender inexistente, listagem paginada, página vazia, markAsRead válido, notificação não encontrada, acesso negado, contagem de não lidas |
+| `UserServiceTest` | 4 | Lista exceto self, lista vazia, findById encontrado, findById inexistente |
+| `JwtServiceTest` | 6 | Geração de token, extração de userId, extração de email, token válido, token expirado, token malformado |
+
+```bash
+cd backend
+mvn test
 ```
 
 ---
@@ -213,7 +277,7 @@ Para desenvolvimento local:
 docker compose up --build
 ```
 
-Aguarde todos os serviços subirem (healthchecks do PostgreSQL e RabbitMQ são verificados automaticamente).
+Aguarde todos os serviços subirem. Os healthchecks do PostgreSQL e RabbitMQ são verificados automaticamente antes do backend iniciar.
 
 | Serviço | URL |
 |---|---|
@@ -328,19 +392,22 @@ npm run dev
 
 > Tipos disponíveis: `INFO` · `WARNING` · `SUCCESS` · `ERROR`
 
-**Resposta paginada:**
+**Resposta de notificação:**
 ```json
 {
-  "content": [
-    {
-      "id": "...",
-      "sender": { "id": "...", "username": "maria" },
-      "message": "Olá, tudo bem?",
-      "type": "INFO",
-      "read": false,
-      "createdAt": "2024-01-01T10:00:00Z"
-    }
-  ],
+  "id": "...",
+  "sender": { "id": "...", "username": "maria" },
+  "message": "Olá, tudo bem?",
+  "type": "INFO",
+  "read": false,
+  "createdAt": "2024-01-01T10:00:00Z"
+}
+```
+
+**Resposta paginada (`GET /api/notifications`):**
+```json
+{
+  "content": [...],
   "page": 0,
   "size": 20,
   "totalElements": 42,
@@ -356,6 +423,7 @@ npm run dev
 Gerenciado pelo **Flyway**. O Hibernate opera apenas em modo `validate` — nunca altera o schema.
 
 ```sql
+-- V1: Usuários
 CREATE TABLE users (
     id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     username    VARCHAR(50)  NOT NULL UNIQUE,
@@ -364,6 +432,7 @@ CREATE TABLE users (
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
+-- V2: Notificações
 CREATE TABLE notifications (
     id           UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     sender_id    UUID         NOT NULL REFERENCES users(id),
@@ -392,23 +461,29 @@ CREATE INDEX idx_notifications_created_at   ON notifications(created_at DESC);
 | `SPRING_RABBITMQ_USERNAME` | `appuser` | Usuário do RabbitMQ |
 | `SPRING_RABBITMQ_PASSWORD` | `apppassword` | Senha do RabbitMQ |
 | `JWT_SECRET` | _(ver application.yml)_ | Chave secreta HS256 (mínimo 256-bit) |
-| `JWT_EXPIRATION_MS` | `86400000` | Tempo de expiração do JWT (24h) |
+| `JWT_EXPIRATION_MS` | `86400000` | Tempo de expiração do JWT em ms (24h) |
 
 ---
 
 ## Decisões Arquiteturais
 
-**Arquitetura Hexagonal**
-A camada `domain` não possui nenhuma dependência do Spring ou de qualquer biblioteca de infraestrutura. Todo detalhe externo (JPA, RabbitMQ, Security) vive em `infrastructure` e aponta para dentro, em direção ao domínio.
+**Clean Architecture**
+O backend é organizado em camadas concêntricas com regra de dependência estrita. A camada `domain` contém POJOs puros sem nenhuma anotação de framework. Os use cases dependem apenas de interfaces (`port/output`), nunca de implementações concretas — JPA, RabbitMQ, BCrypt e JWT são detalhes de infraestrutura, substituíveis sem tocar na lógica de negócio.
+
+**Ports de Input e Output**
+Controllers chamam interfaces (`RegisterUserPort`, `SendNotificationPort`...) — nunca os use cases diretamente. Isso mantém a presentation desacoplada da application e facilita testes unitários sem Spring context.
+
+**Entidades de Domínio como POJOs**
+`User` e `Notification` são classes Java simples sem `@Entity`, sem Lombok, sem Spring. O comportamento de domínio (`notification.markAsRead()`, `notification.belongsTo(userId)`) vive na entidade, não nos serviços. As entidades JPA (`UserJpaEntity`, `NotificationJpaEntity`) existem separadamente na camada de infraestrutura.
 
 **Virtual Threads (Java 21)**
-Habilitados via `spring.threads.virtual.enabled: true`. Cada thread de requisição do Tomcat torna-se uma Virtual Thread, maximizando o throughput em operações I/O-bound sem nenhuma configuração adicional de pool.
+Habilitados via `spring.threads.virtual.enabled: true`. Cada thread de requisição do Tomcat torna-se uma Virtual Thread, maximizando throughput em operações I/O-bound sem configuração adicional de pool.
 
-**Filas RabbitMQ dinâmicas por usuário**
-Uma fila dedicada (`notification.user.<uuid>`) é criada apenas no momento em que o usuário estabelece a conexão SSE. Isso evita o acúmulo ilimitado de filas para usuários offline.
+**Filas RabbitMQ Dinâmicas por Usuário**
+Uma fila dedicada (`notification.user.<uuid>`) é criada apenas quando o usuário estabelece a conexão SSE. Isso evita acúmulo ilimitado de filas para usuários offline.
 
-**AOP para rastreamento de performance**
-O `ExecutionTimeAspect` intercepta automaticamente todos os beans anotados com `@Service` via `within(@Service *)`. A lógica de negócio nunca é poluída com código de monitoramento.
+**AOP para Cross-cutting Concerns**
+O `ExecutionTimeAspect` intercepta todos os beans `@Service` via `within(@Service *)`. A lógica de negócio nunca é poluída com código de monitoramento — alinhado com o princípio de Separação de Responsabilidades.
 
 **SSE em vez de WebSocket**
-Para push unidirecional (servidor → cliente), o SSE é mais simples, usa HTTP padrão e funciona nativamente através de proxies HTTP/1.1. O Nginx está configurado com `proxy_buffering off` e `chunked_transfer_encoding on` para garantir o streaming correto.
+Para push unidirecional (servidor → cliente), o SSE é mais simples, usa HTTP padrão e funciona nativamente em proxies HTTP/1.1. O Nginx está configurado com `proxy_buffering off` e `chunked_transfer_encoding on` para garantir o streaming correto.
