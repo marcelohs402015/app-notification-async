@@ -1,7 +1,7 @@
 package com.appnotification.infrastructure.security;
 
-import com.appnotification.domain.model.User;
-import com.appnotification.domain.repository.UserRepository;
+import com.appnotification.application.port.output.UserRepositoryPort;
+import com.appnotification.domain.entity.User;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -22,19 +22,14 @@ import java.util.UUID;
 public class JwtAuthFilter extends OncePerRequestFilter {
 
     private final JwtService jwtService;
-    private final UserRepository userRepository;
+    private final UserRepositoryPort userRepository;
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
             throws ServletException, IOException {
         String token = resolveToken(request);
 
-        if (token == null) {
-            filterChain.doFilter(request, response);
-            return;
-        }
-
-        if (!jwtService.isTokenValid(token)) {
+        if (token == null || !jwtService.isTokenValid(token)) {
             filterChain.doFilter(request, response);
             return;
         }
@@ -47,9 +42,8 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             return;
         }
 
-        UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(
-                user, null, Collections.emptyList()
-        );
+        UsernamePasswordAuthenticationToken authentication =
+                new UsernamePasswordAuthenticationToken(user, null, Collections.emptyList());
         authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
         SecurityContextHolder.getContext().setAuthentication(authentication);
 

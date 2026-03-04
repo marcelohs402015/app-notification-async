@@ -1,6 +1,5 @@
 package com.appnotification.infrastructure.messaging;
 
-import com.appnotification.application.dto.NotificationResponse;
 import com.appnotification.infrastructure.config.RabbitMQConfig;
 import com.appnotification.infrastructure.sse.SseEmitterRegistry;
 import lombok.RequiredArgsConstructor;
@@ -9,10 +8,10 @@ import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.BindingBuilder;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.TopicExchange;
+import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
-import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.stereotype.Component;
 
@@ -43,16 +42,14 @@ public class NotificationListenerManager {
 
         Queue queue = new Queue(queueName, true, false, false);
         rabbitAdmin.declareQueue(queue);
-
-        Binding binding = BindingBuilder.bind(queue).to(notificationExchange).with(routingKey);
-        rabbitAdmin.declareBinding(binding);
+        rabbitAdmin.declareBinding(BindingBuilder.bind(queue).to(notificationExchange).with(routingKey));
 
         SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
         container.setQueueNames(queueName);
         container.setMessageListener(new MessageListenerAdapter(new Object() {
             @SuppressWarnings("unused")
-            public void handleMessage(NotificationResponse notification) {
-                sseEmitterRegistry.sendToUser(userId, notification);
+            public void handleMessage(NotificationMessage message) {
+                sseEmitterRegistry.sendToUser(userId, message);
             }
         }, messageConverter));
         container.start();

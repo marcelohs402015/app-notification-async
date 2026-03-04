@@ -17,11 +17,9 @@ public class SseEmitterRegistry {
 
     public SseEmitter register(UUID userId) {
         SseEmitter emitter = new SseEmitter(Long.MAX_VALUE);
-
         emitter.onCompletion(() -> emitters.remove(userId));
         emitter.onTimeout(() -> emitters.remove(userId));
         emitter.onError(error -> emitters.remove(userId));
-
         emitters.put(userId, emitter);
 
         try {
@@ -35,13 +33,11 @@ public class SseEmitterRegistry {
 
     public void sendToUser(UUID userId, Object payload) {
         SseEmitter emitter = emitters.get(userId);
-        if (emitter == null) {
-            return;
-        }
+        if (emitter == null) return;
         try {
             emitter.send(SseEmitter.event().name("notification").data(payload));
         } catch (IOException e) {
-            log.warn("Failed to send SSE event to user {}: {}", userId, e.getMessage());
+            log.warn("Failed to send SSE to user {}: {}", userId, e.getMessage());
             emitters.remove(userId);
         }
     }
